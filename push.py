@@ -115,7 +115,7 @@ if __name__ == "__main__":
     except Exception as e: print(f"fetch failed: {e}"); sys.exit(0)
     m5 = fr["M5"]; price = float(m5.close.iloc[-1])
     side,ratio,strength,_ = direction(fr)
-    p = plan(side, fr.get("M15") or m5, price, SPREAD, BUDGET)
+    p = plan(side, fr["M15"] if fr.get("M15") is not None else m5, price, SPREAD, BUDGET)
     strength,f = filt(side,p,strength)
     lots = max(0.01, round(p["lots"]*f,2))
     icon = "🟢" if side==1 else "🔴"; name = "BUY" if side==1 else "SELL"
