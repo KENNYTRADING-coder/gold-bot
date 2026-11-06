@@ -1,67 +1,44 @@
 import os, sys, time, requests, pandas as pd, numpy as np
 
-API_URL = "https://api.realmarketapi.com/api/v1/candle"
-DELTA = {"M5": pd.Timedelta(minutes=5), "M15": pd.Timedelta(minutes=15),
-         "H1": pd.Timedelta(hours=1), "H4": pd.Timedelta(hours=4)}
-FREQ = {"M15":"15min","H1":"1h","H4":"4h"}
 WEIGHT = {"H4":1.5,"H1":1.2,"M15":0.8,"M5":0.5}
 CONTRACT_SIZE = 100
 BUDGET = float(os.getenv("BUDGET","2.0")); SPREAD = float(os.getenv("SPREAD","0.3"))
 
-def env(n):
-    v = os.getenv(n,"")
-    if not v: sys.exit(f"missing {n}")
-    return v
 
-def gf(x,*ks):
-    for k in ks:
-        if k in x and x[k] is not None: return x[k]
-    return None
 
-def fetch(tf):
-    r = requests.get(API_URL, params={"apiKey":env("REALMARKETAPI_KEY"),"symbolCode":"XAUUSD","timeFrame":tf},
-                     headers={"User-Agent":"KennyAIGold/14-push","Accept":"application/json"}, timeout=20)
-    r.raise_for_status(); p = r.json()
-    rows = p.get("data", p.get("Data", [])) if isinstance(p, dict) else p
+def fetch_yahoo(tf):
+    # Yahoo Finance 免费 K 线接口
+    interval = {"M5":"5m", "M15":"15m", "H1":"1h", "H4":"1h"}[tf] # Yahoo 最小粒度5m，4h先用1h代替
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/GC=F?interval={interval}&range=5d"
+    r = requests.get(url, headers={"User-Agent":"Mozilla/5.0"}, timeout=15)
+    r.raise_for_status()
+    res = r.json()['chart']['result'][0]
+    ts = res.get('timestamp', [])
+    quotes = res['indicators']['quote'][0]
     out = []
-    for x in rows if isinstance(rows, list) else []:
-        if not isinstance(x, dict): continue
-        o,h,lo,c = gf(x,"openPrice","OpenPrice"),gf(x,"highPrice","HighPrice"),gf(x,"lowPrice","LowPrice"),gf(x,"closePrice","ClosePrice")
-        t = gf(x,"openTime","OpenTime")
-        if None in (o,h,lo,c,t): continue
-        try: o,h,lo,c = float(o),float(h),float(lo),float(c)
-        except: continue
-        if h<max(o,c) or lo>min(o,c) or h<lo: continue
-        out.append({"time":t,"open":o,"high":h,"low":lo,"close":c})
-    if not out: raise ValueError(f"{tf} 无K线")
-    d = pd.DataFrame(out); d["time"] = pd.to_datetime(d.time, utc=True, errors="coerce")
-    d = d.dropna(subset=["time"]).sort_values("time").drop_duplicates("time",keep="last").reset_index(drop=True)
-    now = pd.Timestamp.now(tz="UTC")
-    d = d[d.time+DELTA[tf] <= now].reset_index(drop=True)
-    if len(d) < 30: raise ValueError(f"{tf} 只有{len(d)}根")
-    return d
+    for i in range(len(ts)):
+        if quotes['open'][i] is not None and quotes['close'][i] is not None:
+            out.append({
+                "time": pd.to_datetime(ts[i], unit='s', utc=True),
+                "open": quotes['open'][i], "high": quotes['high'][i],
+                "low": quotes['low'][i], "close": quotes['close'][i]
+            })
+    df = pd.DataFrame(out)
+    if len(df) < 30: raise ValueError(f"{tf} 数据不足")
 
-def resample(df,tf,src):
-    if df is None or len(df)==0: return None
-    x = df.copy(); x["b"] = x.time.dt.floor(FREQ[tf])
-    a = x.groupby("b").agg(open=("open","first"),high=("high","max"),low=("low","min"),close=("close","last"),n=("open","size"))
-    need = int(DELTA[tf]/DELTA[src]); now = pd.Timestamp.now(tz="UTC")
-    a = a[(a.n>=max(1,int(need*0.8))) & (a.index+DELTA[tf]<=now)]
-    if len(a)==0: return None
-    return a.drop(columns="n").reset_index().rename(columns={"b":"time"})
+    # 如果是请求 H4，就用 1h 的合成一下
+    if tf == "H4":
+        df['time'] = df['time'].dt.floor('4h')
+        df = df.groupby('time').agg(open=('open','first'), high=('high','max'), low=('low','min'), close=('close','last')).reset_index()
+    return df
 
 def load_all():
-    m5 = fetch("M5"); fr = {"M5":m5}
-    for tf in ("H1","H4"):
-        df = None
+    m5 = fetch_yahoo("M5"); fr = {"M5":m5}
+    for tf in ("M15","H1","H4"):
         try:
-            c = fetch(tf)
-            if c is not None and len(c)>=30: df = c
-        except: pass
-        if df is None or len(df)<30:
-            if tf=="H4" and fr.get("H1") is not None and len(fr["H1"])>=30: df = resample(fr["H1"],tf,"H1")
-            else: df = resample(m5,tf,"M5")
-        fr[tf] = df
+            c = fetch_yahoo(tf)
+            fr[tf] = c if len(c)>=30 else None
+        except: fr[tf] = None
     return fr
 
 def ind(df):
@@ -96,11 +73,7 @@ def direction(fr):
     b = {tf:tb(fr.get(tf)) for tf in WEIGHT}
     av = {k:v for k,v in b.items() if v is not None}
     tw = sum(WEIGHT[k] for k in av); s = sum(WEIGHT[k]*v for k,v in av.items())
-    if s==0:
-        ref = fr.get("M15")
-        if ref is None or len(ref)<30: ref = fr.get("M5")
-        if ref is None or len(ref)<30: return 1,0,"弱",b
-        r = ind(ref).iloc[-1]; s = 1.0 if r.close>=r.EMA20 else -1.0
+    if s==0: return 1,0,"弱",b
     ratio = min(1,abs(s)/tw) if tw else 0
     side = 1 if s>0 else -1
     strength = "强" if ratio>=0.75 else "中" if ratio>=0.45 else "弱"
@@ -132,7 +105,8 @@ def filt(side,p,strength):
     return ns,f
 
 def tg(text):
-    tok, chat = env("TELEGRAM_BOT_TOKEN"), env("TELEGRAM_CHAT_ID")
+    tok, chat = os.getenv("TELEGRAM_BOT_TOKEN"), os.getenv("TELEGRAM_CHAT_ID")
+    if not tok or not chat: return False
     for _ in range(2):
         try:
             r = requests.post(f"https://api.telegram.org/bot{tok}/sendMessage",
@@ -146,11 +120,11 @@ if __name__ == "__main__":
     except Exception as e: print(f"fetch failed: {e}"); sys.exit(0)
     m5 = fr["M5"]; price = float(m5.close.iloc[-1])
     side,ratio,strength,_ = direction(fr)
-    p = plan(side, fr.get("H1") or m5, price, SPREAD, BUDGET)
+    p = plan(side, fr.get("M15") or m5, price, SPREAD, BUDGET)
     strength,f = filt(side,p,strength)
     lots = max(0.01, round(p["lots"]*f,2))
     icon = "🟢" if side==1 else "🔴"; name = "BUY" if side==1 else "SELL"
-    txt = (f"🥇 Kenny AI GOLD v14\n{icon} {name} LIMIT | 强度:{strength}\n"
+    txt = (f"🥇 Kenny AI GOLD v14 (免费源)\n{icon} {name} LIMIT | 强度:{strength}\n"
            f"现价 {price:.2f} | RSI {p['rsi']:.1f} | ADX {p['adx']:.1f}\n"
            f"E1 {p['e1']:.2f} | E2 {p['e2']:.2f} | SL {p['sl']:.2f}\n"
            f"TP1 {p['tps'][0]:.2f} | TP2 {p['tps'][1]:.2f} | TP3 {p['tps'][2]:.2f}\n"
