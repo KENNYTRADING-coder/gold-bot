@@ -52,7 +52,7 @@ def resample(df,tf,src):
 
 def load_all():
     m5 = fetch("M5"); fr = {"M5":m5}
-    for tf in ("M15","H1","H4"):
+    for tf in ("H1","H4"):
         df = None
         try:
             c = fetch(tf)
@@ -146,7 +146,7 @@ if __name__ == "__main__":
     except Exception as e: print(f"fetch failed: {e}"); sys.exit(0)
     m5 = fr["M5"]; price = float(m5.close.iloc[-1])
     side,ratio,strength,_ = direction(fr)
-    p = plan(side, fr.get("M15") or m5, price, SPREAD, BUDGET)
+    p = plan(side, fr.get("H1") or m5, price, SPREAD, BUDGET)
     strength,f = filt(side,p,strength)
     lots = max(0.01, round(p["lots"]*f,2))
     icon = "🟢" if side==1 else "🔴"; name = "BUY" if side==1 else "SELL"
